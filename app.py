@@ -1,397 +1,160 @@
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+import os
 import requests
+import unicodedata
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 from bs4 import BeautifulSoup
-import re
 
 app = Flask(__name__)
 CORS(app)
 
-# Liste des joueurs NBA avec leurs équipes
-NBA_PLAYERS = [
-    # Atlanta Hawks
-    {"name": "Trae Young", "team": "Atlanta Hawks", "abbr": "ATL"},
-    {"name": "Dejounte Murray", "team": "Atlanta Hawks", "abbr": "ATL"},
-    {"name": "Clint Capela", "team": "Atlanta Hawks", "abbr": "ATL"},
-    {"name": "Bogdan Bogdanovic", "team": "Atlanta Hawks", "abbr": "ATL"},
-    {"name": "De'Andre Hunter", "team": "Atlanta Hawks", "abbr": "ATL"},
-    
-    # Boston Celtics
-    {"name": "Jayson Tatum", "team": "Boston Celtics", "abbr": "BOS"},
-    {"name": "Jaylen Brown", "team": "Boston Celtics", "abbr": "BOS"},
-    {"name": "Kristaps Porzingis", "team": "Boston Celtics", "abbr": "BOS"},
-    {"name": "Jrue Holiday", "team": "Boston Celtics", "abbr": "BOS"},
-    {"name": "Derrick White", "team": "Boston Celtics", "abbr": "BOS"},
-    
-    # Brooklyn Nets
-    {"name": "Mikal Bridges", "team": "Brooklyn Nets", "abbr": "BKN"},
-    {"name": "Cam Thomas", "team": "Brooklyn Nets", "abbr": "BKN"},
-    {"name": "Nicolas Claxton", "team": "Brooklyn Nets", "abbr": "BKN"},
-    {"name": "Ben Simmons", "team": "Brooklyn Nets", "abbr": "BKN"},
-    
-    # Charlotte Hornets
-    {"name": "LaMelo Ball", "team": "Charlotte Hornets", "abbr": "CHA"},
-    {"name": "Brandon Miller", "team": "Charlotte Hornets", "abbr": "CHA"},
-    {"name": "Miles Bridges", "team": "Charlotte Hornets", "abbr": "CHA"},
-    {"name": "Mark Williams", "team": "Charlotte Hornets", "abbr": "CHA"},
-    
-    # Chicago Bulls
-    {"name": "Zach LaVine", "team": "Chicago Bulls", "abbr": "CHI"},
-    {"name": "DeMar DeRozan", "team": "Chicago Bulls", "abbr": "CHI"},
-    {"name": "Nikola Vucevic", "team": "Chicago Bulls", "abbr": "CHI"},
-    {"name": "Coby White", "team": "Chicago Bulls", "abbr": "CHI"},
-    
-    # Cleveland Cavaliers
-    {"name": "Donovan Mitchell", "team": "Cleveland Cavaliers", "abbr": "CLE"},
-    {"name": "Darius Garland", "team": "Cleveland Cavaliers", "abbr": "CLE"},
-    {"name": "Evan Mobley", "team": "Cleveland Cavaliers", "abbr": "CLE"},
-    {"name": "Jarrett Allen", "team": "Cleveland Cavaliers", "abbr": "CLE"},
-    
-    # Dallas Mavericks
-    {"name": "Luka Doncic", "team": "Dallas Mavericks", "abbr": "DAL"},
-    {"name": "Kyrie Irving", "team": "Dallas Mavericks", "abbr": "DAL"},
-    {"name": "Dereck Lively II", "team": "Dallas Mavericks", "abbr": "DAL"},
-    
-    # Denver Nuggets
-    {"name": "Nikola Jokic", "team": "Denver Nuggets", "abbr": "DEN"},
-    {"name": "Jamal Murray", "team": "Denver Nuggets", "abbr": "DEN"},
-    {"name": "Michael Porter Jr.", "team": "Denver Nuggets", "abbr": "DEN"},
-    {"name": "Aaron Gordon", "team": "Denver Nuggets", "abbr": "DEN"},
-    
-    # Detroit Pistons
-    {"name": "Cade Cunningham", "team": "Detroit Pistons", "abbr": "DET"},
-    {"name": "Jaden Ivey", "team": "Detroit Pistons", "abbr": "DET"},
-    {"name": "Ausar Thompson", "team": "Detroit Pistons", "abbr": "DET"},
-    
-    # Golden State Warriors
-    {"name": "Stephen Curry", "team": "Golden State Warriors", "abbr": "GSW"},
-    {"name": "Klay Thompson", "team": "Golden State Warriors", "abbr": "GSW"},
-    {"name": "Draymond Green", "team": "Golden State Warriors", "abbr": "GSW"},
-    {"name": "Andrew Wiggins", "team": "Golden State Warriors", "abbr": "GSW"},
-    
-    # Houston Rockets
-    {"name": "Alperen Sengun", "team": "Houston Rockets", "abbr": "HOU"},
-    {"name": "Jalen Green", "team": "Houston Rockets", "abbr": "HOU"},
-    {"name": "Jabari Smith Jr.", "team": "Houston Rockets", "abbr": "HOU"},
-    {"name": "Fred VanVleet", "team": "Houston Rockets", "abbr": "HOU"},
-    
-    # Indiana Pacers
-    {"name": "Tyrese Haliburton", "team": "Indiana Pacers", "abbr": "IND"},
-    {"name": "Myles Turner", "team": "Indiana Pacers", "abbr": "IND"},
-    {"name": "Pascal Siakam", "team": "Indiana Pacers", "abbr": "IND"},
-    {"name": "Bennedict Mathurin", "team": "Indiana Pacers", "abbr": "IND"},
-    
-    # LA Clippers
-    {"name": "Kawhi Leonard", "team": "LA Clippers", "abbr": "LAC"},
-    {"name": "Paul George", "team": "LA Clippers", "abbr": "LAC"},
-    {"name": "James Harden", "team": "LA Clippers", "abbr": "LAC"},
-    {"name": "Russell Westbrook", "team": "LA Clippers", "abbr": "LAC"},
-    
-    # Los Angeles Lakers
-    {"name": "LeBron James", "team": "Los Angeles Lakers", "abbr": "LAL"},
-    {"name": "Anthony Davis", "team": "Los Angeles Lakers", "abbr": "LAL"},
-    {"name": "D'Angelo Russell", "team": "Los Angeles Lakers", "abbr": "LAL"},
-    {"name": "Austin Reaves", "team": "Los Angeles Lakers", "abbr": "LAL"},
-    
-    # Memphis Grizzlies
-    {"name": "Ja Morant", "team": "Memphis Grizzlies", "abbr": "MEM"},
-    {"name": "Jaren Jackson Jr.", "team": "Memphis Grizzlies", "abbr": "MEM"},
-    {"name": "Desmond Bane", "team": "Memphis Grizzlies", "abbr": "MEM"},
-    
-    # Miami Heat
-    {"name": "Jimmy Butler", "team": "Miami Heat", "abbr": "MIA"},
-    {"name": "Bam Adebayo", "team": "Miami Heat", "abbr": "MIA"},
-    {"name": "Tyler Herro", "team": "Miami Heat", "abbr": "MIA"},
-    
-    # Milwaukee Bucks
-    {"name": "Giannis Antetokounmpo", "team": "Milwaukee Bucks", "abbr": "MIL"},
-    {"name": "Damian Lillard", "team": "Milwaukee Bucks", "abbr": "MIL"},
-    {"name": "Khris Middleton", "team": "Milwaukee Bucks", "abbr": "MIL"},
-    {"name": "Brook Lopez", "team": "Milwaukee Bucks", "abbr": "MIL"},
-    
-    # Minnesota Timberwolves
-    {"name": "Anthony Edwards", "team": "Minnesota Timberwolves", "abbr": "MIN"},
-    {"name": "Karl-Anthony Towns", "team": "Minnesota Timberwolves", "abbr": "MIN"},
-    {"name": "Rudy Gobert", "team": "Minnesota Timberwolves", "abbr": "MIN"},
-    {"name": "Mike Conley", "team": "Minnesota Timberwolves", "abbr": "MIN"},
-    
-    # New Orleans Pelicans
-    {"name": "Zion Williamson", "team": "New Orleans Pelicans", "abbr": "NOP"},
-    {"name": "Brandon Ingram", "team": "New Orleans Pelicans", "abbr": "NOP"},
-    {"name": "CJ McCollum", "team": "New Orleans Pelicans", "abbr": "NOP"},
-    {"name": "Herb Jones", "team": "New Orleans Pelicans", "abbr": "NOP"},
-    
-    # New York Knicks
-    {"name": "Jalen Brunson", "team": "New York Knicks", "abbr": "NYK"},
-    {"name": "Julius Randle", "team": "New York Knicks", "abbr": "NYK"},
-    {"name": "RJ Barrett", "team": "New York Knicks", "abbr": "NYK"},
-    {"name": "Mitchell Robinson", "team": "New York Knicks", "abbr": "NYK"},
-    
-    # Oklahoma City Thunder
-    {"name": "Shai Gilgeous-Alexander", "team": "Oklahoma City Thunder", "abbr": "OKC"},
-    {"name": "Chet Holmgren", "team": "Oklahoma City Thunder", "abbr": "OKC"},
-    {"name": "Jalen Williams", "team": "Oklahoma City Thunder", "abbr": "OKC"},
-    {"name": "Josh Giddey", "team": "Oklahoma City Thunder", "abbr": "OKC"},
-    
-    # Orlando Magic
-    {"name": "Paolo Banchero", "team": "Orlando Magic", "abbr": "ORL"},
-    {"name": "Franz Wagner", "team": "Orlando Magic", "abbr": "ORL"},
-    {"name": "Wendell Carter Jr.", "team": "Orlando Magic", "abbr": "ORL"},
-    
-    # Philadelphia 76ers
-    {"name": "Joel Embiid", "team": "Philadelphia 76ers", "abbr": "PHI"},
-    {"name": "Tyrese Maxey", "team": "Philadelphia 76ers", "abbr": "PHI"},
-    {"name": "Tobias Harris", "team": "Philadelphia 76ers", "abbr": "PHI"},
-    
-    # Phoenix Suns
-    {"name": "Kevin Durant", "team": "Phoenix Suns", "abbr": "PHX"},
-    {"name": "Devin Booker", "team": "Phoenix Suns", "abbr": "PHX"},
-    {"name": "Bradley Beal", "team": "Phoenix Suns", "abbr": "PHX"},
-    {"name": "Jusuf Nurkic", "team": "Phoenix Suns", "abbr": "PHX"},
-    
-    # Portland Trail Blazers
-    {"name": "Damian Lillard", "team": "Portland Trail Blazers", "abbr": "POR"},
-    {"name": "Anfernee Simons", "team": "Portland Trail Blazers", "abbr": "POR"},
-    {"name": "Jerami Grant", "team": "Portland Trail Blazers", "abbr": "POR"},
-    {"name": "Shaedon Sharpe", "team": "Portland Trail Blazers", "abbr": "POR"},
-    
-    # Sacramento Kings
-    {"name": "De'Aaron Fox", "team": "Sacramento Kings", "abbr": "SAC"},
-    {"name": "Domantas Sabonis", "team": "Sacramento Kings", "abbr": "SAC"},
-    {"name": "Keegan Murray", "team": "Sacramento Kings", "abbr": "SAC"},
-    
-    # San Antonio Spurs
-    {"name": "Victor Wembanyama", "team": "San Antonio Spurs", "abbr": "SAS"},
-    {"name": "Devin Vassell", "team": "San Antonio Spurs", "abbr": "SAS"},
-    {"name": "Keldon Johnson", "team": "San Antonio Spurs", "abbr": "SAS"},
-    
-    # Toronto Raptors
-    {"name": "Scottie Barnes", "team": "Toronto Raptors", "abbr": "TOR"},
-    {"name": "Pascal Siakam", "team": "Toronto Raptors", "abbr": "TOR"},
-    {"name": "OG Anunoby", "team": "Toronto Raptors", "abbr": "TOR"},
-    
-    # Utah Jazz
-    {"name": "Lauri Markkanen", "team": "Utah Jazz", "abbr": "UTA"},
-    {"name": "Jordan Clarkson", "team": "Utah Jazz", "abbr": "UTA"},
-    {"name": "Walker Kessler", "team": "Utah Jazz", "abbr": "UTA"},
-    
-    # Washington Wizards
-    {"name": "Kyle Kuzma", "team": "Washington Wizards", "abbr": "WAS"},
-    {"name": "Jordan Poole", "team": "Washington Wizards", "abbr": "WAS"},
-    {"name": "Tyus Jones", "team": "Washington Wizards", "abbr": "WAS"},
-]
-
-TEAM_MAPPINGS = {
-    'ATL': {'nbc': 'atlanta-hawks', 'espn': 'atl', 'cbs': 'ATL'},
-    'BOS': {'nbc': 'boston-celtics', 'espn': 'bos', 'cbs': 'BOS'},
-    'BKN': {'nbc': 'brooklyn-nets', 'espn': 'bkn', 'cbs': 'BKN'},
-    'CHA': {'nbc': 'charlotte-hornets', 'espn': 'cha', 'cbs': 'CHA'},
-    'CHI': {'nbc': 'chicago-bulls', 'espn': 'chi', 'cbs': 'CHI'},
-    'CLE': {'nbc': 'cleveland-cavaliers', 'espn': 'cle', 'cbs': 'CLE'},
-    'DAL': {'nbc': 'dallas-mavericks', 'espn': 'dal', 'cbs': 'DAL'},
-    'DEN': {'nbc': 'denver-nuggets', 'espn': 'den', 'cbs': 'DEN'},
-    'DET': {'nbc': 'detroit-pistons', 'espn': 'det', 'cbs': 'DET'},
-    'GSW': {'nbc': 'golden-state-warriors', 'espn': 'gs', 'cbs': 'GSW'},
-    'HOU': {'nbc': 'houston-rockets', 'espn': 'hou', 'cbs': 'HOU'},
-    'IND': {'nbc': 'indiana-pacers', 'espn': 'ind', 'cbs': 'IND'},
-    'LAC': {'nbc': 'la-clippers', 'espn': 'lac', 'cbs': 'LAC'},
-    'LAL': {'nbc': 'los-angeles-lakers', 'espn': 'lal', 'cbs': 'LAL'},
-    'MEM': {'nbc': 'memphis-grizzlies', 'espn': 'mem', 'cbs': 'MEM'},
-    'MIA': {'nbc': 'miami-heat', 'espn': 'mia', 'cbs': 'MIA'},
-    'MIL': {'nbc': 'milwaukee-bucks', 'espn': 'mil', 'cbs': 'MIL'},
-    'MIN': {'nbc': 'minnesota-timberwolves', 'espn': 'min', 'cbs': 'MIN'},
-    'NOP': {'nbc': 'new-orleans-pelicans', 'espn': 'no', 'cbs': 'NOP'},
-    'NYK': {'nbc': 'new-york-knicks', 'espn': 'ny', 'cbs': 'NYK'},
-    'OKC': {'nbc': 'oklahoma-city-thunder', 'espn': 'okc', 'cbs': 'OKC'},
-    'ORL': {'nbc': 'orlando-magic', 'espn': 'orl', 'cbs': 'ORL'},
-    'PHI': {'nbc': 'philadelphia-76ers', 'espn': 'phi', 'cbs': 'PHI'},
-    'PHX': {'nbc': 'phoenix-suns', 'espn': 'phx', 'cbs': 'PHX'},
-    'POR': {'nbc': 'portland-trail-blazers', 'espn': 'por', 'cbs': 'POR'},
-    'SAC': {'nbc': 'sacramento-kings', 'espn': 'sac', 'cbs': 'SAC'},
-    'SAS': {'nbc': 'san-antonio-spurs', 'espn': 'sa', 'cbs': 'SAS'},
-    'TOR': {'nbc': 'toronto-raptors', 'espn': 'tor', 'cbs': 'TOR'},
-    'UTA': {'nbc': 'utah-jazz', 'espn': 'utah', 'cbs': 'UTA'},
-    'WAS': {'nbc': 'washington-wizards', 'espn': 'wsh', 'cbs': 'WAS'},
+# --- CONFIGURATION ---
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.9',
 }
 
-def get_player_team(player_name):
-    """Trouve l'équipe d'un joueur"""
-    for player in NBA_PLAYERS:
-        if player['name'].lower() == player_name.lower():
-            return player['abbr']
-    return None
+# Liste complète des joueurs actifs (Générée pour la saison 2024-2025)
+# Cette liste est servie au frontend via /api/players
+ALL_PLAYERS = [
+    "Precious Achiuwa", "Bam Adebayo", "Ochai Agbaji", "Santi Aldama", "Nickeil Alexander-Walker", "Grayson Allen", "Jarrett Allen", "Jose Alvarado", "Kyle Anderson", "Giannis Antetokounmpo", "Thanasis Antetokounmpo", "Cole Anthony", "OG Anunoby", "Ryan Arcidiacono", "Deni Avdija", "Deandre Ayton", "Udoka Azubuike",
+    "Marvin Bagley III", "Patrick Baldwin Jr.", "LaMelo Ball", "Lonzo Ball", "Mo Bamba", "Paolo Banchero", "Desmond Bane", "Dalano Banton", "Dominick Barlow", "Harrison Barnes", "Scottie Barnes", "RJ Barrett", "Charles Bassey", "Emoni Bates", "Keita Bates-Diop", "Nicolas Batum", "Bradley Beal", "Malik Beasley", "MarJon Beauchamp", "Davis Bertans", "Patrick Beverley", "Saddiq Bey", "Goga Bitadze", "Bismack Biyombo", "Anthony Black", "Bogdan Bogdanovic", "Bojan Bogdanovic", "Bol Bol", "Marques Bolden", "Devin Booker", "Brandon Boston Jr.", "Chris Boucher", "James Bouknight", "Christian Braun", "Mikal Bridges", "Miles Bridges", "Oshae Brissett", "Malcolm Brogdon", "Dillon Brooks", "Bruce Brown", "Jaylen Brown", "Kendall Brown", "Kobe Brown", "Moses Brown", "Greg Brown III", "Jalen Brunson", "Thomas Bryant", "Kobe Bufkin", "Reggie Bullock", "Alec Burks", "Jimmy Butler",
+    "Kentavious Caldwell-Pope", "Toumani Camara", "Vlatko Cancar", "Clint Capela", "Jevon Carter", "Wendell Carter Jr.", "Alex Caruso", "Julian Champagnie", "Max Christie", "Sidy Cissoko", "Jordan Clarkson", "Nic Claxton", "Noah Clowney", "Amir Coffey", "John Collins", "Zach Collins", "Mike Conley", "Pat Connaughton", "Bilal Coulibaly", "Robert Covington", "Torrey Craig", "Jae Crowder", "Cade Cunningham", "Seth Curry", "Stephen Curry", "Dyson Daniels",
+    "Anthony Davis", "Johnny Davis", "DeMar DeRozan", "Dewayne Dedmon", "Ousmane Dieng", "Spencer Dinwiddie", "Donte DiVincenzo", "Luka Doncic", "Luguentz Dort", "Ayo Dosunmu", "Andre Drummond", "Chris Duarte", "Kris Dunn", "Kevin Durant", "Jalen Duren", "Tari Eason", "Anthony Edwards", "Keon Ellis", "Joel Embiid", "Drew Eubanks",
+    "Dante Exum", "Bruno Fernando", "Dorian Finney-Smith", "Malachi Flynn", "Simone Fontecchio", "Jordan Ford", "Evan Fournier", "De'Aaron Fox", "Daniel Gafford", "Danilo Gallinari", "Darius Garland", "Usman Garuba", "Luka Garza", "Paul George", "Keyonte George", "Taj Gibson", "Josh Giddey", "Harry Giles III", "Shai Gilgeous-Alexander", "Anthony Gill", "Rudy Gobert", "Jordan Goodwin", "Aaron Gordon", "Eric Gordon", "Devonte' Graham", "Jerami Grant", "RaiQuan Gray", "AJ Green", "Draymond Green", "Jalen Green", "Jeff Green", "Josh Green", "Griffin Login", "Quentin Grimes",
+    "Rui Hachimura", "Tyrese Haliburton", "R.J. Hampton", "Tim Hardaway Jr.", "James Harden", "Jaden Hardy", "Tobias Harris", "Josh Hart", "Isaiah Hartenstein", "Sam Hauser", "Jaxson Hayes", "Killian Hayes", "Gordon Hayward", "Scoot Henderson", "Taylor Hendricks", "Tyler Herro", "Buddy Hield", "Haywood Highsmith", "Nate Hinton", "Aaron Holiday", "Jrue Holiday", "Richaun Holmes", "Chet Holmgren", "Jalen Hood-Schifino", "Al Horford", "Talen Horton-Tucker", "Danuel House Jr.", "Caleb Houstan", "Jett Howard", "Kevin Huerter", "De'Andre Hunter", "Bones Hyland",
+    "Joe Ingles", "Brandon Ingram", "Kyrie Irving", "Jonathan Isaac", "Jaden Ivey", "G.G. Jackson", "Isaiah Jackson", "Reggie Jackson", "Trayce Jackson-Davis", "Jaren Jackson Jr.", "LeBron James", "Jaime Jaquez Jr.", "DaQuan Jeffries", "Ty Jerome", "Isaiah Joe", "Cameron Johnson", "Jalen Johnson", "Keldon Johnson", "Keon Johnson", "Keyontae Johnson", "Nikola Jokic", "Damian Jones", "Herbert Jones", "Tre Jones", "Tyus Jones", "Cory Joseph", "Nikola Jovic", "Johnny Juzang",
+    "Luke Kennard", "Walker Kessler", "Braxton Key", "Corey Kispert", "Maxi Kleber", "Kevin Knox II", "Christian Koloko", "John Konchar", "Furkan Korkmaz", "Luke Kornet", "Jonathan Kuminga", "Kyle Kuzma", "Jake LaRavia", "Zach LaVine", "Jock Landale", "Caris LeVert", "Damion Lee", "Saben Lee", "Alex Len", "Kawhi Leonard", "Kira Lewis Jr.", "Maxwell Lewis", "Damian Lillard", "Nassir Little", "Dereck Lively II", "Kenneth Lofton Jr.", "Kevon Looney", "Brook Lopez", "Robin Lopez", "Kyle Lowry", "Seth Lundy", "Trey Lyles",
+    "Theo Maledon", "Terance Mann", "Tre Mann", "Boban Marjanovic", "Lauri Markkanen", "Naji Marshall", "Caleb Martin", "Cody Martin", "K.J. Martin", "Garrison Mathews", "Bennedict Mathurin", "Wesley Matthews", "Tyrese Maxey", "Skylar Mays", "Miles McBride", "C.J. McCollum", "T.J. McConnell", "Jaden McDaniels", "Jalen McDaniels", "Doug McDermott", "JaVale McGee", "Cameron McGough", "Bryce McGowens", "Jordan McLaughlin", "De'Anthony Melton", "Sam Merrill", "Chimezie Metu", "Vasilije Micic", "Khris Middleton", "Brandon Miller", "Leonard Miller", "Patty Mills", "Shake Milton", "Davion Mitchell", "Donovan Mitchell", "Evan Mobley", "Isaiah Mobley", "Malik Monk", "Moses Moody", "Xavier Moon", "Wendell Moore Jr.", "Ja Morant", "Marcus Morris Sr.", "Markieff Morris", "Monte Morris", "Trey Murphy III", "Dejounte Murray", "Jamal Murray", "Keegan Murray", "Kris Murray", "Mike Muscala", "Svi Mykhailiuk",
+    "Larry Nance Jr.", "Andrew Nembhard", "Aaron Nesmith", "Georges Niang", "Daishen Nix", "Zeke Nnaji", "Jaylen Nowell", "Frank Ntilikina", "Jusuf Nurkic", "Jordan Nwora", "Royce O'Neale", "Chuma Okeke", "Josh Okogie", "Onyeka Okongwu", "Isaac Okoro", "Kelly Olynyk", "Cedi Osman", "Kelly Oubre Jr.",
+    "Chris Paul", "Cameron Payne", "Gary Payton II", "Filip Petrusev", "Julian Phillips", "Jalen Pickett", "Mason Plumlee", "Brandin Podziemski", "Jakob Poeltl", "Aleksej Pokusevski", "Jordan Poole", "Kevin Porter Jr.", "Michael Porter Jr.", "Otto Porter Jr.", "Bobby Portis", "Kristaps Porzingis", "Dwight Powell", "Norman Powell", "Taurean Prince", "Payton Pritchard", "Olivier-Maxence Prosper",
+    "Neemias Queta", "Immanuel Quickley", "Lester Quinones", "Julius Randle", "Duop Reath", "Austin Reaves", "Cam Reddish", "Paul Reed", "Naz Reid", "Jared Rhoden", "Nick Richards", "Josh Richardson", "Duncan Robinson", "Jerome Robinson", "Mitchell Robinson", "David Roddy", "Ryan Rollins", "Derrick Rose", "Terry Rozier", "Rayan Rupert", "D'Angelo Russell",
+    "Domantas Sabonis", "Luka Samanic", "Adama Sanogo", "Dario Saric", "Olivier Sarr", "Marcus Sasser", "Schofield Admiral", "Dennis Schroder", "Alperen Sengun", "Brice Sensabaugh", "Collin Sexton", "Landry Shamet", "Day'Ron Sharpe", "Shaedon Sharpe", "Pascal Siakam", "Ben Simmons", "Anfernee Simons", "Jericho Sims", "Marcus Smart", "Dru Smith", "Ish Smith", "Jalen Smith", "Jabari Smith Jr.", "Dennis Smith Jr.", "Jeremy Sochan", "Jaden Springer", "Lamar Stevens", "Isaiah Stewart", "Julian Strawther", "Max Strus", "Jalen Suggs", "Edmond Sumner", "Cole Swider",
+    "Jae'Sean Tate", "Jayson Tatum", "Terry Taylor", "Garrett Temple", "Dalen Terry", "Daniel Theis", "Cam Thomas", "Amen Thompson", "Ausar Thompson", "Klay Thompson", "Tristan Thompson", "JT Thor", "Matisse Thybulle", "Xavier Tillman", "Obi Toppin", "Karl-Anthony Towns", "Gary Trent Jr.", "Oscar Tshiebwe", "P.J. Tucker", "Myles Turner",
+    "Jonas Valanciunas", "Fred VanVleet", "Jarred Vanderbilt", "Devin Vassell", "Sasha Vezenkov", "Gabe Vincent", "Nikola Vucevic", "Dean Wade", "Franz Wagner", "Moritz Wagner", "Ish Wainright", "Jabari Walker", "Jarace Walker", "Lonnie Walker IV", "Cason Wallace", "T.J. Warren", "P.J. Washington", "TyTy Washington Jr.", "Yuta Watanabe", "Lindy Waters III", "Trendon Watford", "Peyton Watson", "Victor Wembanyama", "Blake Wesley", "Russell Westbrook", "Coby White", "Derrick White", "Cam Whitmore", "Aaron Wiggins", "Andrew Wiggins", "Lindell Wigginton", "Grant Williams", "Jalen Williams", "Jaylin Williams", "Kenrich Williams", "Mark Williams", "Patrick Williams", "Robert Williams III", "Vince Williams Jr.", "Zion Williamson", "D.J. Wilson", "Dylan Windler", "James Wiseman", "Christian Wood", "Delon Wright", "McKinley Wright IV",
+    "Thaddeus Young", "Trae Young", "Omer Yurtseven", "Cody Zeller", "Ivica Zubac"
+]
 
-def scrape_nbc_injuries(team_abbr, player_name):
-    """Scrape les blessures depuis NBC Sports"""
-    try:
-        team_slug = TEAM_MAPPINGS[team_abbr]['nbc']
-        url = f'https://www.nbcsports.com/nba/{team_slug}/injuries'
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        injuries = []
-        
-        # Chercher les lignes de tableau ou sections de blessures
-        injury_rows = soup.find_all(['tr', 'div'], class_=re.compile('injury|player', re.I))
-        
-        for row in injury_rows:
-            text = row.get_text()
-            if player_name.lower() in text.lower():
-                injury = {
-                    'player': player_name,
-                    'status': 'Out',
-                    'injury': '',
-                    'date': '',
-                    'comment': text.strip()
-                }
-                injuries.append(injury)
-                break
-        
-        return injuries
-    except Exception as e:
-        print(f"Erreur NBC: {e}")
-        return []
+def normalize_text(text):
+    if not text:
+        return ""
+    return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn').lower().strip()
 
-def scrape_espn_injuries(team_abbr, player_name):
-    """Scrape les blessures depuis ESPN"""
+def scrape_cbs_injuries(player_name):
+    url = "https://www.cbssports.com/nba/injuries/"
     try:
-        team_slug = TEAM_MAPPINGS[team_abbr]['espn']
-        url = f'https://www.espn.com/nba/team/injuries/_/name/{team_slug}'
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        injuries = []
-        
-        # ESPN utilise généralement des tableaux
-        tables = soup.find_all('table')
-        
-        for table in tables:
-            rows = table.find_all('tr')
-            for row in rows:
-                text = row.get_text()
-                if player_name.lower() in text.lower():
-                    cells = row.find_all(['td', 'th'])
-                    if len(cells) >= 3:
-                        injury = {
-                            'player': player_name,
-                            'status': cells[1].get_text().strip() if len(cells) > 1 else 'Out',
-                            'injury': cells[2].get_text().strip() if len(cells) > 2 else '',
-                            'date': cells[3].get_text().strip() if len(cells) > 3 else '',
-                            'comment': ''
-                        }
-                        injuries.append(injury)
-                        break
-        
-        return injuries
-    except Exception as e:
-        print(f"Erreur ESPN: {e}")
-        return []
-
-def scrape_cbs_injuries(team_abbr, player_name):
-    """Scrape les blessures depuis CBS Sports"""
-    try:
-        team_slug = TEAM_MAPPINGS[team_abbr]['cbs']
-        team_name_slug = TEAM_MAPPINGS[team_abbr]['nbc']
-        url = f'https://www.cbssports.com/nba/teams/{team_slug}/{team_name_slug}/injuries/'
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        injuries = []
-        
-        # CBS utilise généralement des tableaux avec classe spécifique
-        tables = soup.find_all('table')
-        
-        for table in tables:
-            rows = table.find_all('tr')
-            for row in rows:
-                text = row.get_text()
-                if player_name.lower() in text.lower():
-                    cells = row.find_all(['td', 'th'])
-                    if len(cells) >= 2:
-                        injury = {
-                            'player': player_name,
-                            'status': cells[1].get_text().strip() if len(cells) > 1 else 'Out',
-                            'injury': cells[2].get_text().strip() if len(cells) > 2 else '',
-                            'date': cells[3].get_text().strip() if len(cells) > 3 else '',
-                            'comment': ''
-                        }
-                        injuries.append(injury)
-                        break
-        
-        return injuries
+        response = requests.get(url, headers=HEADERS, timeout=5)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        rows = soup.find_all('tr')
+        normalized_target = normalize_text(player_name)
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) >= 2:
+                name_col = cols[0].get_text()
+                if normalized_target in normalize_text(name_col):
+                    status = cols[-1].get_text(strip=True)
+                    injury = cols[-2].get_text(strip=True)
+                    return f"{status} - {injury}"
+        return None
     except Exception as e:
         print(f"Erreur CBS: {e}")
-        return []
+        return "Erreur temporaire CBS"
+
+def scrape_espn_injuries(player_name):
+    url = "https://www.espn.com/nba/injuries"
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=5)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        normalized_target = normalize_text(player_name)
+        player_links = soup.find_all('a', href=True)
+        for link in player_links:
+            if "player" in link['href'] and normalized_target in normalize_text(link.get_text()):
+                row = link.find_parent('tr')
+                if row:
+                    cols = row.find_all('td')
+                    if len(cols) >= 2:
+                        status = cols[1].get_text(strip=True)
+                        comment = cols[2].get_text(strip=True) if len(cols) > 2 else ""
+                        return f"{status} ({comment})"
+        return None
+    except Exception as e:
+        print(f"Erreur ESPN: {e}")
+        return "Erreur temporaire ESPN"
+
+def scrape_nbc_data(player_name):
+    """
+    Récupère directement les infos de la page joueur NBC Sports.
+    Format URL: https://www.nbcsports.com/nba/player/{first-last}
+    """
+    # Formatage du slug (LeBron James -> lebron-james)
+    slug = normalize_text(player_name).replace(" ", "-")
+    url = f"https://www.nbcsports.com/nba/player/{slug}"
+    
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=6)
+        
+        # Si redirection ou 404, le joueur a peut-être un URL différent ou n'existe pas chez NBC
+        if response.status_code != 200:
+            return f"Page joueur introuvable ({response.status_code})"
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # NBC change souvent ses classes CSS, on cherche large
+        # Recherche 1: Section "Latest News"
+        news_items = soup.find_all('div', class_=lambda x: x and 'PlayerNews-headline' in x)
+        
+        if not news_items:
+            # Fallback: Recherche générique de paragraphes dans la section principale
+            content_area = soup.find('div', class_='Page-content')
+            if content_area:
+                paragraphs = content_area.find_all('p')
+                if paragraphs:
+                    return paragraphs[0].get_text(strip=True)[:200] + "..."
+
+        if news_items:
+            # On prend le premier titre et le premier bout de texte
+            headline = news_items[0].get_text(strip=True)
+            # On essaie de trouver le texte associé
+            parent = news_items[0].find_parent()
+            details = parent.find('div', class_=lambda x: x and 'PlayerNews-body' in x)
+            detail_text = details.get_text(strip=True) if details else ""
+            
+            return f"{headline}: {detail_text}"[:250] + "..." # On coupe si trop long
+            
+        return "Aucune news récente trouvée sur NBC."
+
+    except Exception as e:
+        print(f"Erreur NBC: {e}")
+        return "Erreur d'accès NBC Sports"
+
+@app.route('/')
+def home():
+    return "API NBA Injury Running. Use /api/check?player=Name or /api/players"
 
 @app.route('/api/players', methods=['GET'])
-def get_players():
-    """Retourne la liste de tous les joueurs"""
-    return jsonify(NBA_PLAYERS)
+def get_all_players():
+    """Renvoie la liste complète des joueurs au format JSON."""
+    return jsonify(ALL_PLAYERS)
 
-@app.route('/api/injuries/<player_name>', methods=['GET'])
-def get_injuries(player_name):
-    """Récupère les blessures pour un joueur spécifique"""
-    
-    team_abbr = get_player_team(player_name)
-    
-    if not team_abbr:
-        return jsonify({'error': 'Joueur non trouvé'}), 404
-    
-    if team_abbr not in TEAM_MAPPINGS:
-        return jsonify({'error': 'Équipe non supportée'}), 404
-    
-    # Scraper les trois sources
-    nbc_injuries = scrape_nbc_injuries(team_abbr, player_name)
-    espn_injuries = scrape_espn_injuries(team_abbr, player_name)
-    cbs_injuries = scrape_cbs_injuries(team_abbr, player_name)
-    
-    # Construire les URLs
-    team_map = TEAM_MAPPINGS[team_abbr]
-    urls = {
-        'nbc': f'https://www.nbcsports.com/nba/{team_map["nbc"]}/injuries',
-        'espn': f'https://www.espn.com/nba/team/injuries/_/name/{team_map["espn"]}',
-        'cbs': f'https://www.cbssports.com/nba/teams/{team_map["cbs"]}/{team_map["nbc"]}/injuries/'
-    }
+@app.route('/api/check', methods=['GET'])
+def check_injury():
+    player_name = request.args.get('player')
+    if not player_name:
+        return jsonify({"error": "Nom manquant"}), 400
+        
+    cbs = scrape_cbs_injuries(player_name)
+    espn = scrape_espn_injuries(player_name)
+    nbc = scrape_nbc_data(player_name)
     
     return jsonify({
-        'player': player_name,
-        'team': team_abbr,
-        'sources': {
-            'nbc': nbc_injuries,
-            'espn': espn_injuries,
-            'cbs': cbs_injuries
-        },
-        'urls': urls
-    })
-
-@app.route('/', methods=['GET'])
-def index():
-    """Page d'accueil de l'API"""
-    return jsonify({
-        'message': 'NBA Injury Tracker API',
-        'endpoints': {
-            '/api/players': 'Liste de tous les joueurs NBA',
-            '/api/injuries/<player_name>': 'Informations sur les blessures d\'un joueur'
+        "player": player_name,
+        "sources": {
+            "CBS": cbs if cbs else "Healthy / Pas sur la liste",
+            "ESPN": espn if espn else "Pas sur la liste",
+            "NBC": nbc
         }
     })
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
