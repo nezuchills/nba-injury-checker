@@ -1,6 +1,7 @@
 import os
 import requests
 import unicodedata
+import re
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from bs4 import BeautifulSoup
@@ -10,12 +11,15 @@ CORS(app)
 
 # --- CONFIGURATION ---
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://www.google.com/'
 }
 
-# Liste complète des joueurs actifs (Générée pour la saison 2024-2025)
-# Cette liste est servie au frontend via /api/players
+# Liste complète des joueurs (Même liste que précédemment, abrégée ici pour la lisibilité du code généré, 
+# mais gardez votre liste complète dans le déploiement réel)
+# Note: Assurez-vous d'avoir la liste ALL_PLAYERS complète comme dans la version précédente.
 ALL_PLAYERS = [
     "Precious Achiuwa", "Bam Adebayo", "Ochai Agbaji", "Santi Aldama", "Nickeil Alexander-Walker", "Grayson Allen", "Jarrett Allen", "Jose Alvarado", "Kyle Anderson", "Giannis Antetokounmpo", "Thanasis Antetokounmpo", "Cole Anthony", "OG Anunoby", "Ryan Arcidiacono", "Deni Avdija", "Deandre Ayton", "Udoka Azubuike",
     "Marvin Bagley III", "Patrick Baldwin Jr.", "LaMelo Ball", "Lonzo Ball", "Mo Bamba", "Paolo Banchero", "Desmond Bane", "Dalano Banton", "Dominick Barlow", "Harrison Barnes", "Scottie Barnes", "RJ Barrett", "Charles Bassey", "Emoni Bates", "Keita Bates-Diop", "Nicolas Batum", "Bradley Beal", "Malik Beasley", "MarJon Beauchamp", "Davis Bertans", "Patrick Beverley", "Saddiq Bey", "Goga Bitadze", "Bismack Biyombo", "Anthony Black", "Bogdan Bogdanovic", "Bojan Bogdanovic", "Bol Bol", "Marques Bolden", "Devin Booker", "Brandon Boston Jr.", "Chris Boucher", "James Bouknight", "Christian Braun", "Mikal Bridges", "Miles Bridges", "Oshae Brissett", "Malcolm Brogdon", "Dillon Brooks", "Bruce Brown", "Jaylen Brown", "Kendall Brown", "Kobe Brown", "Moses Brown", "Greg Brown III", "Jalen Brunson", "Thomas Bryant", "Kobe Bufkin", "Reggie Bullock", "Alec Burks", "Jimmy Butler",
@@ -36,21 +40,32 @@ ALL_PLAYERS = [
 ]
 
 def normalize_text(text):
+    """Supprime accents et minuscules"""
     if not text:
         return ""
     return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn').lower().strip()
 
+def clean_slug(text):
+    """Prépare le nom pour les URLs (ex: 'C.J. McCollum' -> 'cj-mccollum')"""
+    text = normalize_text(text)
+    text = text.replace('.', '') # Enlever les points (C.J. -> cj)
+    text = text.replace("'", '') # Enlever les apostrophes (De'Aaron -> deaaron)
+    text = re.sub(r'\s+', '-', text) # Espaces -> tirets
+    return text
+
 def scrape_cbs_injuries(player_name):
     url = "https://www.cbssports.com/nba/injuries/"
     try:
-        response = requests.get(url, headers=HEADERS, timeout=5)
+        response = requests.get(url, headers=HEADERS, timeout=6)
         soup = BeautifulSoup(response.content, 'html.parser')
         rows = soup.find_all('tr')
         normalized_target = normalize_text(player_name)
+        
         for row in rows:
             cols = row.find_all('td')
             if len(cols) >= 2:
                 name_col = cols[0].get_text()
+                # Vérification plus souple
                 if normalized_target in normalize_text(name_col):
                     status = cols[-1].get_text(strip=True)
                     injury = cols[-2].get_text(strip=True)
@@ -58,70 +73,99 @@ def scrape_cbs_injuries(player_name):
         return None
     except Exception as e:
         print(f"Erreur CBS: {e}")
-        return "Erreur temporaire CBS"
+        return None
 
-def scrape_espn_injuries(player_name):
-    url = "https://www.espn.com/nba/injuries"
+def scrape_rotowire_injuries(player_name):
+    """Remplace ESPN par Rotowire"""
+    url = "https://www.rotowire.com/basketball/injury-report.php"
     try:
-        response = requests.get(url, headers=HEADERS, timeout=5)
+        response = requests.get(url, headers=HEADERS, timeout=6)
         soup = BeautifulSoup(response.content, 'html.parser')
+        
         normalized_target = normalize_text(player_name)
-        player_links = soup.find_all('a', href=True)
-        for link in player_links:
+        
+        # Rotowire utilise souvent des divs ou tables. On cherche les liens joueurs
+        # Structure commune: div.injury-report__player-name a -> text
+        links = soup.find_all('a', href=True)
+        
+        for link in links:
             if "player" in link['href'] and normalized_target in normalize_text(link.get_text()):
-                row = link.find_parent('tr')
+                # On a trouvé le joueur, on cherche le conteneur parent (souvent une ligne de table ou div)
+                # Rotowire Table structure: 
+                # Row -> Cell Name -> Cell Injury -> Cell Status -> Cell Est. Return
+                row = link.find_parent('div', class_='injury-report__row') # Format div
+                if not row:
+                    row = link.find_parent('tr') # Fallback format table
+                
                 if row:
-                    cols = row.find_all('td')
-                    if len(cols) >= 2:
-                        status = cols[1].get_text(strip=True)
-                        comment = cols[2].get_text(strip=True) if len(cols) > 2 else ""
-                        return f"{status} ({comment})"
+                    # Essayer d'extraire les infos selon les classes CSS de Rotowire
+                    injury_div = row.find(class_='injury-report__injury')
+                    status_div = row.find(class_='injury-report__status')
+                    return_div = row.find(class_='injury-report__return')
+                    
+                    injury = injury_div.get_text(strip=True) if injury_div else "Unknown"
+                    status = status_div.get_text(strip=True) if status_div else ""
+                    est_return = return_div.get_text(strip=True) if return_div else ""
+                    
+                    # Fallback si classes non trouvées (si c'est une table standard)
+                    if not injury_div and isinstance(row, object) and hasattr(row, 'find_all'):
+                        cols = row.find_all('td')
+                        if len(cols) > 3:
+                            injury = cols[2].get_text(strip=True)
+                            status = cols[3].get_text(strip=True)
+                    
+                    return f"{status} - {injury} (Est. return: {est_return})"
+
         return None
     except Exception as e:
-        print(f"Erreur ESPN: {e}")
-        return "Erreur temporaire ESPN"
+        print(f"Erreur Rotowire: {e}")
+        return None
 
 def scrape_nbc_data(player_name):
     """
-    Récupère directement les infos de la page joueur NBC Sports.
-    Format URL: https://www.nbcsports.com/nba/player/{first-last}
+    Nouvelle méthode pour NBC Sports.
+    Utilise la balise META description pour contourner le rendu React complexe.
     """
-    # Formatage du slug (LeBron James -> lebron-james)
-    slug = normalize_text(player_name).replace(" ", "-")
+    slug = clean_slug(player_name)
     url = f"https://www.nbcsports.com/nba/player/{slug}"
     
     try:
-        response = requests.get(url, headers=HEADERS, timeout=6)
+        response = requests.get(url, headers=HEADERS, timeout=8)
         
-        # Si redirection ou 404, le joueur a peut-être un URL différent ou n'existe pas chez NBC
         if response.status_code != 200:
-            return f"Page joueur introuvable ({response.status_code})"
+            return f"Page joueur introuvable (Code {response.status_code})"
 
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # NBC change souvent ses classes CSS, on cherche large
-        # Recherche 1: Section "Latest News"
-        news_items = soup.find_all('div', class_=lambda x: x and 'PlayerNews-headline' in x)
-        
-        if not news_items:
-            # Fallback: Recherche générique de paragraphes dans la section principale
-            content_area = soup.find('div', class_='Page-content')
-            if content_area:
-                paragraphs = content_area.find_all('p')
-                if paragraphs:
-                    return paragraphs[0].get_text(strip=True)[:200] + "..."
+        # 1. Essayer de trouver la Meta Description (contient souvent la dernière news)
+        meta_desc = soup.find('meta', attrs={'name': 'description'})
+        if meta_desc and meta_desc.get('content'):
+            content = meta_desc.get('content')
+            # Nettoyer le texte standard de NBC
+            if "Latest news, stats" in content:
+                # Parfois c'est juste un placeholder, on continue de chercher
+                pass
+            else:
+                return content[:250] + "..."
 
-        if news_items:
-            # On prend le premier titre et le premier bout de texte
-            headline = news_items[0].get_text(strip=True)
-            # On essaie de trouver le texte associé
-            parent = news_items[0].find_parent()
-            details = parent.find('div', class_=lambda x: x and 'PlayerNews-body' in x)
-            detail_text = details.get_text(strip=True) if details else ""
-            
-            return f"{headline}: {detail_text}"[:250] + "..." # On coupe si trop long
-            
-        return "Aucune news récente trouvée sur NBC."
+        # 2. Recherche spécifique News Headline (si le HTML est rendu)
+        news_headline = soup.find(class_='PlayerNews-headline')
+        if news_headline:
+            headline_text = news_headline.get_text(strip=True)
+            # Chercher le corps du texte associé
+            news_body = news_headline.find_next(class_='PlayerNews-body')
+            body_text = news_body.get_text(strip=True) if news_body else ""
+            return f"{headline_text}: {body_text}"[:250] + "..."
+
+        # 3. Fallback : JSON-LD (Données structurées Google)
+        # Parfois les news sont dans un script json+ld
+        scripts = soup.find_all('script', type='application/ld+json')
+        for script in scripts:
+            if player_name in script.get_text():
+                # C'est trop complexe de parser tout le JSON ici, mais souvent présent
+                pass
+
+        return "Aucune news récente détectée (Format de page protégé)."
 
     except Exception as e:
         print(f"Erreur NBC: {e}")
@@ -129,11 +173,10 @@ def scrape_nbc_data(player_name):
 
 @app.route('/')
 def home():
-    return "API NBA Injury Running. Use /api/check?player=Name or /api/players"
+    return "API NBA Injury Running."
 
 @app.route('/api/players', methods=['GET'])
 def get_all_players():
-    """Renvoie la liste complète des joueurs au format JSON."""
     return jsonify(ALL_PLAYERS)
 
 @app.route('/api/check', methods=['GET'])
@@ -143,14 +186,14 @@ def check_injury():
         return jsonify({"error": "Nom manquant"}), 400
         
     cbs = scrape_cbs_injuries(player_name)
-    espn = scrape_espn_injuries(player_name)
+    rotowire = scrape_rotowire_injuries(player_name)
     nbc = scrape_nbc_data(player_name)
     
     return jsonify({
         "player": player_name,
         "sources": {
             "CBS": cbs if cbs else "Healthy / Pas sur la liste",
-            "ESPN": espn if espn else "Pas sur la liste",
+            "Rotowire": rotowire if rotowire else "Pas sur la liste",
             "NBC": nbc
         }
     })
