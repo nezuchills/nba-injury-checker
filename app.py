@@ -20,7 +20,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Headers pour imiter un navigateur (Indispensable pour NBC/ESPN)
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -44,7 +43,6 @@ def generate_team_slug(team_city, team_name):
 def update_player_database():
     print("Mise à jour de la base de données via NBA API...")
     try:
-        # is_only_current_season=1 garantit les rosters actuels (ex: Lillard @ Portland)
         nba_response = commonallplayers.CommonAllPlayers(is_only_current_season=1)
         data = nba_response.get_dict()
         headers = data['resultSets'][0]['headers']
@@ -83,7 +81,6 @@ def get_player_details(player_id):
         
         def get_val(key): return row[headers.index(key)] if key in headers else "N/A"
 
-        # Calcul âge
         birthdate_str = get_val('BIRTHDATE')
         age = "N/A"
         if birthdate_str and "T" in birthdate_str:
@@ -107,22 +104,19 @@ def get_player_details(player_id):
         return {"age": "?", "team_name": "Unknown", "team_slug": "", "position": "?"}
 
 def clean_text_snippet(text):
-    text = re.sub(r'<[^>]+>', ' ', text) # Enlever HTML
-    text = re.sub(r'\s+', ' ', text).strip() # Nettoyer espaces
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
     return text[:300]
 
-# --- 1. NBC SPORTS (Bulldozer Mode) ---
+# --- 1. NBC SPORTS ---
 def scrape_nbc(team_slug, player_name):
     if not team_slug: return "Équipe inconnue"
+    # URL stricte demandée
     url = f"https://www.nbcsports.com/nba/{team_slug}/injuries"
     
     try:
         session = requests.Session()
         response = session.get(url, headers=HEADERS, timeout=8)
-        
-        if response.status_code == 404:
-             url = f"https://www.nbcsports.com/nba/{team_slug}"
-             response = session.get(url, headers=HEADERS, timeout=8)
 
         if response.status_code != 200: return "Erreur accès NBC"
 
@@ -130,48 +124,45 @@ def scrape_nbc(team_slug, player_name):
         lastname = player_name.split()[-1]
         full_text = soup.get_text(separator=' ', strip=True)
         
-        # Recherche large du nom + contexte
         match = re.search(rf"{re.escape(lastname)}\s+(.{{10,350}})", full_text, re.IGNORECASE)
         
         if match:
             snippet = clean_text_snippet(match.group(1))
-            # Mots clés pour valider que c'est une news pertinente
             keywords = ['injury', 'out', 'status', 'surgery', 'strain', 'questionable', 'doubtful', 'probable', 'available', 'sidelined', 'return', 'miss', 'day-to-day', 'game']
             if any(k in snippet.lower() for k in keywords):
                 return snippet + "..."
         
-        return "Rien à signaler (Healthy ?)"
+        return "Rien à signaler"
     except Exception as e:
         return f"Erreur: {str(e)}"
 
 # --- 2. ESPN ---
 def scrape_espn(player_name):
+    # URL stricte demandée
     url = "https://www.espn.com/nba/injuries"
     try:
         response = requests.get(url, headers=HEADERS, timeout=6)
         soup = BeautifulSoup(response.content, 'html.parser')
         
         norm_name = normalize_text(player_name)
-        
-        # ESPN liste tous les joueurs blessés avec des liens
         links = soup.find_all('a', href=True)
+        
         for link in links:
             if "player" in link['href'] and norm_name in normalize_text(link.text):
-                # Remonter au tableau parent (tr)
                 row = link.find_parent('tr')
                 if row:
                     cols = row.find_all('td')
-                    # Colonne 1: Nom, 2: Status, 3: Date, 4: Commentaire
                     if len(cols) >= 2:
                         status = cols[1].get_text(strip=True)
                         comment = cols[3].get_text(strip=True) if len(cols) > 3 else ""
                         return f"{status}: {comment}"
         return "Rien à signaler"
     except:
-        return None
+        return "Erreur d'accès"
 
 # --- 3. CBS SPORTS ---
 def scrape_cbs(player_name):
+    # URL stricte demandée
     url = "https://www.cbssports.com/nba/injuries/"
     try:
         response = requests.get(url, headers=HEADERS, timeout=6)
@@ -189,7 +180,7 @@ def scrape_cbs(player_name):
                     return f"{status} - {injury}"
         return "Rien à signaler"
     except:
-        return None
+        return "Erreur d'accès"
 
 @app.on_event("startup")
 def startup_event():
@@ -201,7 +192,6 @@ def get_players():
 
 @app.get("/api/check")
 def check_injury(player: str = Query(..., min_length=1)):
-    # 1. Trouver le joueur dans le cache
     player_data = PLAYER_CACHE.get(player)
     if not player_data:
         for name, data in PLAYER_CACHE.items():
@@ -213,10 +203,8 @@ def check_injury(player: str = Query(..., min_length=1)):
     if not player_data:
         return {"error": "Joueur introuvable"}
 
-    # 2. Détails API NBA
     details = get_player_details(player_data['id'])
     
-    # 3. Scraping Sources
     return {
         "player": player,
         "meta": {
