@@ -9,19 +9,16 @@ import uvicorn
 from bs4 import BeautifulSoup
 from nba_api.stats.endpoints import commonallplayers
 
-# Initialisation de l'application FastAPI
 app = FastAPI(title="NBA Injury API")
 
-# Configuration CORS (Remplace Flask-CORS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Autorise toutes les origines (Carrd, localhost, etc.)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- CONFIGURATION GLOBALE ---
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -32,8 +29,6 @@ HEADERS = {
 
 JSON_FILE = 'nba_players.json'
 PLAYER_CACHE = {}
-
-# --- FONCTIONS UTILITAIRES (Logic identique) ---
 
 def normalize_text(text):
     if not text: return ""
@@ -85,15 +80,57 @@ def load_player_database():
         PLAYER_CACHE = update_player_database()
 
 def clean_regex_result(text):
-    """Nettoie les artefacts JSON/HTML du texte extrait brut."""
     text = re.sub(r'<[^>]+>', '', text)
     text = text.replace('"', '').replace('{', '').replace('}', '').replace('\\', '')
+    # Nettoyer les sauts de ligne multiples
+    text = re.sub(r'\s+', ' ', text).strip()
     end = text.find('.')
+    # Prendre un peu plus de contexte si possible (2 phrases)
     if end != -1:
-        text = text[:end+1]
-    return text[:200] + "..."
+        next_end = text.find('.', end + 1)
+        if next_end != -1 and next_end < 300:
+            text = text[:next_end+1]
+        else:
+            text = text[:end+1]
+    return text[:300]
 
-# --- LOGIQUE DE SCRAPING ---
+# --- LOGIQUE DE SCRAPING AMÉLIORÉE ---
+
+def scrape_nbc_player_profile(player_name):
+    """
+    Scrape la page individuelle du joueur (ex: /nba/player/damian-lillard)
+    Utile pour récupérer la 'Meta Description' qui contient souvent la dernière news.
+    """
+    # Générer le slug joueur : "Damian Lillard" -> "damian-lillard"
+    player_slug = normalize_text(player_name).replace(" ", "-")
+    url = f"https://www.nbcsports.com/nba/player/{player_slug}"
+    
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=8)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # 1. Chercher la balise Meta Description (Souvent le résumé de la dernière news)
+            meta_desc = soup.find('meta', attrs={'name': 'description'})
+            if meta_desc:
+                content = meta_desc.get('content', '').strip()
+                # Filtrer les descriptions par défaut génériques
+                if content and "Latest news, stats" not in content and len(content) > 50:
+                    return f"{content}"
+
+            # 2. Chercher dans le JSON-LD (Données structurées)
+            scripts = soup.find_all('script', type='application/ld+json')
+            for script in scripts:
+                if "description" in script.text:
+                    try:
+                        data = json.loads(script.text)
+                        if 'description' in data:
+                            return data['description']
+                    except:
+                        pass
+    except:
+        pass
+    return None
 
 def scrape_nbc_data(player_name):
     player_info = None
@@ -110,42 +147,53 @@ def scrape_nbc_data(player_name):
     if not player_info:
         return "Joueur introuvable dans la base NBA."
         
+    # TENTATIVE 1 : Page Équipe (Injuries)
     team_slug = player_info['team_slug']
     url = f"https://www.nbcsports.com/nba/{team_slug}/injuries"
     
     try:
         response = requests.get(url, headers=HEADERS, timeout=10)
         soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # MÉTHODE 1 : DOM Parsing
-        injury_rows = soup.find_all("div", class_=lambda x: x and "sr-us-injuries-line__wrapper" in x)
         target_lastname = normalize_text(player_info['name'].split()[-1])
 
+        # A. DOM Parsing
+        injury_rows = soup.find_all("div", class_=lambda x: x and "sr-us-injuries-line__wrapper" in x)
         if injury_rows:
             for row in injury_rows:
                 name_div = row.find("div", class_=lambda x: x and "sr-us-injuries-line__player-name" in x)
                 if name_div and target_lastname in normalize_text(name_div.get_text(strip=True)):
                     injury_div = row.find("div", class_=lambda x: x and "sr-us-injuries-line__injury" in x)
                     comment_div = row.find("div", class_=lambda x: x and "sr-us-injuries-line__comment" in x)
-                    
-                    inj = injury_div.get_text(strip=True) if injury_div else "News"
+                    inj = injury_div.get_text(strip=True) if injury_div else "Info"
                     com = comment_div.get_text(strip=True) if comment_div else ""
                     return f"{inj}: {com}"
 
-        # MÉTHODE 2 : Fallback Regex
+        # B. Fallback Regex sur Page Équipe (Nom de famille uniquement)
+        # On cherche "Lillard" suivi de texte, au cas où "Damian" n'est pas écrit
         page_source = response.text
-        match = re.search(rf"{re.escape(player_info['name'])}.*?(.{{10,300}})", page_source, re.IGNORECASE | re.DOTALL)
+        # Regex : Lastname + caractères arbitraires + mots clés de blessure potentiels dans les 300 caractères
+        # On évite d'être trop restrictif sur les mots clés pour attraper les textes libres
+        match = re.search(rf"{re.escape(player_info['name'].split()[-1])}.*?(.{{10,300}})", page_source, re.IGNORECASE | re.DOTALL)
         
         if match:
             raw_fragment = match.group(1)
-            if "injury" in raw_fragment.lower() or "out" in raw_fragment.lower() or "status" in raw_fragment.lower() or "metatarsal" in raw_fragment.lower():
+            # Vérification simple pour éviter de capturer du code JS
+            if "{" not in raw_fragment[:50]: 
                 cleaned = clean_regex_result(raw_fragment)
-                return f"Info détectée (Raw): {cleaned}"
+                # Si le texte semble pertinent (contient des mots clés ou une date)
+                if any(x in cleaned.lower() for x in ['injury', 'out', 'status', 'back', 'season', 'game', 'day']):
+                     return f"Info Équipe (Raw): {cleaned}"
+
+        # TENTATIVE 2 : Page Profil Joueur (Fallback ultime)
+        # Si rien sur la page équipe, on checke la page du joueur
+        profile_info = scrape_nbc_player_profile(player_info['name'])
+        if profile_info:
+            return f"Profil NBC: {profile_info}"
         
-        # Backup Rotowire
+        # TENTATIVE 3 : Backup Rotowire
         backup = scrape_rotowire_injuries(player_name)
         if backup:
-            return f"Via Rotowire (NBC Sync): {backup}"
+            return f"Via Rotowire: {backup}"
 
         return f"Aucune info active trouvée pour {player_info['name']}."
 
@@ -193,29 +241,20 @@ def scrape_rotowire_injuries(player_name):
     except:
         return None
 
-# --- ÉVÉNEMENTS ET ROUTES FASTAPI ---
-
 @app.on_event("startup")
 def startup_event():
-    """Charge la base de données au démarrage de l'application."""
     load_player_database()
 
 @app.get("/")
 def home():
-    count = len(PLAYER_CACHE)
-    return f"API NBA Ready (FastAPI). {count} joueurs en DB."
+    return f"API NBA Ready (FastAPI). {len(PLAYER_CACHE)} joueurs en DB."
 
 @app.get("/api/players")
 def get_all_players():
-    """Retourne la liste des joueurs pour l'autocomplétion."""
     return list(PLAYER_CACHE.keys())
 
 @app.get("/api/check")
-def check_injury(player: str = Query(..., min_length=1, description="Nom du joueur à rechercher")):
-    """
-    Vérifie les blessures sur NBC, CBS et Rotowire.
-    Utilise 'def' au lieu de 'async def' pour gérer les appels requests bloquants via threadpool.
-    """
+def check_injury(player: str = Query(..., min_length=1)):
     nbc = scrape_nbc_data(player)
     cbs = scrape_cbs_injuries(player)
     rotowire = scrape_rotowire_injuries(player)
@@ -229,7 +268,6 @@ def check_injury(player: str = Query(..., min_length=1, description="Nom du joue
         }
     }
 
-# Point d'entrée pour le développement local
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
     uvicorn.run(app, host='0.0.0.0', port=port)
