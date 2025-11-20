@@ -4,7 +4,7 @@ import requests
 import unicodedata
 import re
 from datetime import datetime
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from bs4 import BeautifulSoup
@@ -20,28 +20,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Headers renforcés pour imiter un vrai navigateur et passer les protections basiques
+# Headers pour imiter un navigateur (Indispensable pour NBC/ESPN)
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-User': '?1',
     'Cache-Control': 'max-age=0',
 }
 
 JSON_FILE = 'nba_players.json'
 PLAYER_CACHE = {}
-
-# Overrides manuels
-MANUAL_OVERRIDES = {
-    "Damian Lillard": "portland-trail-blazers",
-}
 
 def normalize_text(text):
     if not text: return ""
@@ -52,8 +42,9 @@ def generate_team_slug(team_city, team_name):
     return full_name.lower().replace(" ", "-").replace(".", "").replace("'", "")
 
 def update_player_database():
-    print("Mise à jour de la base de données joueurs via NBA API...")
+    print("Mise à jour de la base de données via NBA API...")
     try:
+        # is_only_current_season=1 garantit les rosters actuels (ex: Lillard @ Portland)
         nba_response = commonallplayers.CommonAllPlayers(is_only_current_season=1)
         data = nba_response.get_dict()
         headers = data['resultSets'][0]['headers']
@@ -72,7 +63,7 @@ def update_player_database():
             json.dump(players_dict, f)
         return players_dict
     except Exception as e:
-        print(f"Erreur NBA API Update: {e}")
+        print(f"Erreur NBA API: {e}")
         return {}
 
 def load_player_database():
@@ -90,9 +81,9 @@ def get_player_details(player_id):
         headers = data['headers']
         row = data['rowSet'][0]
         
-        def get_val(key):
-            return row[headers.index(key)] if key in headers else "N/A"
+        def get_val(key): return row[headers.index(key)] if key in headers else "N/A"
 
+        # Calcul âge
         birthdate_str = get_val('BIRTHDATE')
         age = "N/A"
         if birthdate_str and "T" in birthdate_str:
@@ -102,12 +93,7 @@ def get_player_details(player_id):
 
         team_city = get_val('TEAM_CITY')
         team_name = get_val('TEAM_NAME')
-        player_name = get_val('DISPLAY_FIRST_LAST')
         team_slug = generate_team_slug(team_city, team_name)
-        
-        if player_name in MANUAL_OVERRIDES:
-            team_slug = MANUAL_OVERRIDES[player_name]
-            team_name = team_slug.replace("-", " ").title() 
 
         return {
             "age": str(age),
@@ -121,93 +107,87 @@ def get_player_details(player_id):
         return {"age": "?", "team_name": "Unknown", "team_slug": "", "position": "?"}
 
 def clean_text_snippet(text):
-    """Nettoie un extrait de texte brut."""
-    # Supprime les balises HTML résiduelles
-    text = re.sub(r'<[^>]+>', ' ', text)
-    # Supprime les caractères spéciaux JSON/JS
-    text = text.replace('"', '').replace('\\', '').replace('{', '').replace('}', '')
-    # Normalise les espaces
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text[:400]
+    text = re.sub(r'<[^>]+>', ' ', text) # Enlever HTML
+    text = re.sub(r'\s+', ' ', text).strip() # Nettoyer espaces
+    return text[:300]
 
-def scrape_nbc_team_page(team_slug, player_name):
+# --- 1. NBC SPORTS (Bulldozer Mode) ---
+def scrape_nbc(team_slug, player_name):
     if not team_slug: return "Équipe inconnue"
-    
     url = f"https://www.nbcsports.com/nba/{team_slug}/injuries"
     
     try:
-        # Utilisation d'une session pour gérer les cookies basiques
         session = requests.Session()
-        response = session.get(url, headers=HEADERS, timeout=10)
+        response = session.get(url, headers=HEADERS, timeout=8)
         
-        # Si 404 sur /injuries, tenter la page d'équipe principale
         if response.status_code == 404:
              url = f"https://www.nbcsports.com/nba/{team_slug}"
-             response = session.get(url, headers=HEADERS, timeout=10)
+             response = session.get(url, headers=HEADERS, timeout=8)
 
-        if response.status_code != 200:
-            return f"Erreur d'accès NBC ({response.status_code})"
+        if response.status_code != 200: return "Erreur accès NBC"
 
         soup = BeautifulSoup(response.content, 'html.parser')
         lastname = player_name.split()[-1]
-        norm_lastname = normalize_text(lastname)
-
-        # STRATÉGIE 1 : Extraction de texte pur (Bulldozer)
-        # On convertit tout le HTML en texte brut. Si l'info est visible, elle est là.
         full_text = soup.get_text(separator=' ', strip=True)
         
-        # On cherche la position du nom dans ce texte géant
-        # On utilise une regex simple pour trouver le nom suivi de mots (insensible à la casse)
-        # On capture ~300 caractères après le nom
+        # Recherche large du nom + contexte
         match = re.search(rf"{re.escape(lastname)}\s+(.{{10,350}})", full_text, re.IGNORECASE)
         
         if match:
-            snippet = match.group(1)
-            # Vérification de pertinence (Mots clés blessure/status)
-            keywords = ['injury', 'out', 'status', 'surgery', 'strain', 'questionable', 'doubtful', 'probable', 'available', 'sidelined', 'return', 'miss', 'day-to-day']
-            
+            snippet = clean_text_snippet(match.group(1))
+            # Mots clés pour valider que c'est une news pertinente
+            keywords = ['injury', 'out', 'status', 'surgery', 'strain', 'questionable', 'doubtful', 'probable', 'available', 'sidelined', 'return', 'miss', 'day-to-day', 'game']
             if any(k in snippet.lower() for k in keywords):
-                return clean_text_snippet(snippet) + "..."
-
-        # STRATÉGIE 2 : Recherche dans les Scripts JSON (Données cachées)
-        # Souvent les données sont dans <script id="__NEXT_DATA__"> ou similaire
-        scripts = soup.find_all('script')
-        for script in scripts:
-            if script.string and lastname in script.string:
-                # On a trouvé le nom dans un script. On essaie d'extraire le contexte.
-                # C'est du "Sale" regex sur du code JS/JSON, mais c'est efficace quand le parsing échoue.
-                match_script = re.search(rf"{re.escape(lastname)}.*?(.{{10,300}})", script.string, re.IGNORECASE)
-                if match_script:
-                    raw = match_script.group(1)
-                    # Nettoyage agressif car c'est du code
-                    if "injury" in raw.lower() or "status" in raw.lower():
-                         return f"Info (Script): {clean_text_snippet(raw)}"
-
-        return f"Rien à signaler sur la page {team_slug}."
-
+                return snippet + "..."
+        
+        return "Rien à signaler (Healthy ?)"
     except Exception as e:
-        return f"Erreur NBC: {e}"
+        return f"Erreur: {str(e)}"
 
-def scrape_rotowire(player_name):
+# --- 2. ESPN ---
+def scrape_espn(player_name):
+    url = "https://www.espn.com/nba/injuries"
     try:
-        url = "https://www.rotowire.com/basketball/injury-report.php"
-        # Rotowire bloque parfois si pas de User-Agent
-        res = requests.get(url, headers=HEADERS, timeout=6)
-        soup = BeautifulSoup(res.content, 'html.parser')
-        links = soup.find_all('a', href=True)
+        response = requests.get(url, headers=HEADERS, timeout=6)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
         norm_name = normalize_text(player_name)
+        
+        # ESPN liste tous les joueurs blessés avec des liens
+        links = soup.find_all('a', href=True)
         for link in links:
             if "player" in link['href'] and norm_name in normalize_text(link.text):
-                row = link.find_parent('div', class_='injury-report__row')
+                # Remonter au tableau parent (tr)
+                row = link.find_parent('tr')
                 if row:
-                    inj = row.find(class_='injury-report__injury')
-                    status = row.find(class_='injury-report__status')
-                    ret = row.find(class_='injury-report__return')
-                    res_text = f"{status.text.strip()} - {inj.text.strip()}"
-                    if ret:
-                         res_text += f" (Retour: {ret.text.strip()})"
-                    return res_text
+                    cols = row.find_all('td')
+                    # Colonne 1: Nom, 2: Status, 3: Date, 4: Commentaire
+                    if len(cols) >= 2:
+                        status = cols[1].get_text(strip=True)
+                        comment = cols[3].get_text(strip=True) if len(cols) > 3 else ""
+                        return f"{status}: {comment}"
+        return "Rien à signaler"
+    except:
         return None
+
+# --- 3. CBS SPORTS ---
+def scrape_cbs(player_name):
+    url = "https://www.cbssports.com/nba/injuries/"
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=6)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        rows = soup.find_all('tr')
+        norm_name = normalize_text(player_name)
+        
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) >= 2:
+                name_col = cols[0].get_text()
+                if norm_name in normalize_text(name_col):
+                    status = cols[-1].get_text(strip=True)
+                    injury = cols[-2].get_text(strip=True)
+                    return f"{status} - {injury}"
+        return "Rien à signaler"
     except:
         return None
 
@@ -215,16 +195,13 @@ def scrape_rotowire(player_name):
 def startup_event():
     load_player_database()
 
-@app.get("/")
-def home():
-    return "API NBA Ready"
-
 @app.get("/api/players")
-def get_all_players():
+def get_players():
     return list(PLAYER_CACHE.keys())
 
 @app.get("/api/check")
 def check_injury(player: str = Query(..., min_length=1)):
+    # 1. Trouver le joueur dans le cache
     player_data = PLAYER_CACHE.get(player)
     if not player_data:
         for name, data in PLAYER_CACHE.items():
@@ -236,14 +213,10 @@ def check_injury(player: str = Query(..., min_length=1)):
     if not player_data:
         return {"error": "Joueur introuvable"}
 
+    # 2. Détails API NBA
     details = get_player_details(player_data['id'])
     
-    # NBC Scraping
-    nbc_info = scrape_nbc_team_page(details['team_slug'], player)
-    
-    # Rotowire Scraping
-    roto_info = scrape_rotowire(player)
-
+    # 3. Scraping Sources
     return {
         "player": player,
         "meta": {
@@ -253,8 +226,9 @@ def check_injury(player: str = Query(..., min_length=1)):
             "jersey": details['jersey']
         },
         "sources": {
-            "NBC": nbc_info,
-            "Rotowire": roto_info if roto_info else "Rien à signaler"
+            "NBC": scrape_nbc(details['team_slug'], player),
+            "ESPN": scrape_espn(player),
+            "CBS": scrape_cbs(player)
         }
     }
 
