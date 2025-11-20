@@ -3,11 +3,12 @@ import json
 import requests
 import unicodedata
 import re
+from datetime import datetime
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from bs4 import BeautifulSoup
-from nba_api.stats.endpoints import commonallplayers
+from nba_api.stats.endpoints import commonallplayers, commonplayerinfo
 
 app = FastAPI(title="NBA Injury API")
 
@@ -30,45 +31,43 @@ HEADERS = {
 JSON_FILE = 'nba_players.json'
 PLAYER_CACHE = {}
 
+# Overrides manuels si l'API NBA est en retard sur les transferts récents
+MANUAL_OVERRIDES = {
+    "Damian Lillard": "portland-trail-blazers", # Exemple selon votre requête
+}
+
 def normalize_text(text):
     if not text: return ""
     return ''.join(c for c in unicodedata.normalize('NFD', str(text)) if unicodedata.category(c) != 'Mn').lower().strip()
 
 def generate_team_slug(team_city, team_name):
+    """Génère le slug pour NBC : 'Portland', 'Trail Blazers' -> 'portland-trail-blazers'"""
     full_name = f"{team_city} {team_name}"
-    return full_name.lower().replace(" ", "-").replace(".", "")
+    return full_name.lower().replace(" ", "-").replace(".", "").replace("'", "")
 
 def update_player_database():
     print("Mise à jour de la base de données joueurs via NBA API...")
     try:
+        # On récupère ID et Nom pour la recherche
         nba_response = commonallplayers.CommonAllPlayers(is_only_current_season=1)
         data = nba_response.get_dict()
         headers = data['resultSets'][0]['headers']
         rows = data['resultSets'][0]['rowSet']
         
         players_dict = {}
+        idx_id = headers.index('PERSON_ID')
         idx_name = headers.index('DISPLAY_FIRST_LAST')
-        idx_city = headers.index('TEAM_CITY')
-        idx_team_name = headers.index('TEAM_NAME')
-        idx_team_id = headers.index('TEAM_ID')
         
         for row in rows:
+            pid = row[idx_id]
             name = row[idx_name]
-            team_id = row[idx_team_id]
-            if team_id != 0:
-                slug = generate_team_slug(row[idx_city], row[idx_team_name])
-                players_dict[name] = {
-                    "name": name,
-                    "team_slug": slug,
-                    "team_city": row[idx_city],
-                    "team_name": row[idx_team_name]
-                }
+            players_dict[name] = {"id": pid, "name": name}
         
         with open(JSON_FILE, 'w') as f:
             json.dump(players_dict, f)
         return players_dict
     except Exception as e:
-        print(f"Erreur NBA API: {e}")
+        print(f"Erreur NBA API Update: {e}")
         return {}
 
 def load_player_database():
@@ -79,167 +78,121 @@ def load_player_database():
     else:
         PLAYER_CACHE = update_player_database()
 
+def get_player_details(player_id):
+    """Récupère l'âge, l'équipe actuelle et la position via l'endpoint Detail."""
+    try:
+        # Appel à l'API NBA pour les détails
+        info = commonplayerinfo.CommonPlayerInfo(player_id=player_id)
+        data = info.get_dict()['resultSets'][0]
+        headers = data['headers']
+        row = data['rowSet'][0]
+        
+        # Extraction sécurisée avec index
+        def get_val(key):
+            return row[headers.index(key)] if key in headers else "N/A"
+
+        # Calcul de l'âge si BIRTHDATE est présent
+        birthdate_str = get_val('BIRTHDATE') # Format: 1990-07-15T00:00:00
+        age = "N/A"
+        if birthdate_str and "T" in birthdate_str:
+            b_date = datetime.strptime(birthdate_str.split('T')[0], "%Y-%m-%d")
+            today = datetime.today()
+            age = today.year - b_date.year - ((today.month, today.day) < (b_date.month, b_date.day))
+
+        team_city = get_val('TEAM_CITY')
+        team_name = get_val('TEAM_NAME')
+        
+        # Gestion des override manuel pour l'équipe
+        player_name = get_val('DISPLAY_FIRST_LAST')
+        team_slug = generate_team_slug(team_city, team_name)
+        
+        if player_name in MANUAL_OVERRIDES:
+            team_slug = MANUAL_OVERRIDES[player_name]
+            # On met à jour le nom d'affichage pour que ça soit cohérent
+            team_name = team_slug.replace("-", " ").title() 
+
+        return {
+            "age": str(age),
+            "team_name": f"{team_city} {team_name}",
+            "team_slug": team_slug,
+            "position": get_val('POSITION'),
+            "jersey": get_val('JERSEY')
+        }
+    except Exception as e:
+        print(f"Erreur Details: {e}")
+        return {"age": "?", "team_name": "Unknown", "team_slug": "", "position": "?"}
+
 def clean_regex_result(text):
     text = re.sub(r'<[^>]+>', '', text)
     text = text.replace('"', '').replace('{', '').replace('}', '').replace('\\', '')
-    # Nettoyer les sauts de ligne multiples
     text = re.sub(r'\s+', ' ', text).strip()
-    end = text.find('.')
-    # Prendre un peu plus de contexte si possible (2 phrases)
-    if end != -1:
-        next_end = text.find('.', end + 1)
-        if next_end != -1 and next_end < 300:
-            text = text[:next_end+1]
-        else:
-            text = text[:end+1]
-    return text[:300]
+    return text[:350] + "..."
 
-# --- LOGIQUE DE SCRAPING AMÉLIORÉE ---
+# --- SCRAPING NBC CIBLÉ ---
 
-def scrape_nbc_player_profile(player_name):
+def scrape_nbc_team_page(team_slug, player_name):
     """
-    Scrape la page individuelle du joueur (ex: /nba/player/damian-lillard)
-    Utile pour récupérer la 'Meta Description' qui contient souvent la dernière news.
+    Cherche sur la page : https://www.nbcsports.com/nba/{team-slug}/injuries
+    Utilise le Regex car les données sont souvent dans un widget JS Sportradar.
     """
-    # Générer le slug joueur : "Damian Lillard" -> "damian-lillard"
-    player_slug = normalize_text(player_name).replace(" ", "-")
-    url = f"https://www.nbcsports.com/nba/player/{player_slug}"
+    if not team_slug: return "Équipe inconnue"
     
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=8)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # 1. Chercher la balise Meta Description (Souvent le résumé de la dernière news)
-            meta_desc = soup.find('meta', attrs={'name': 'description'})
-            if meta_desc:
-                content = meta_desc.get('content', '').strip()
-                # Filtrer les descriptions par défaut génériques
-                if content and "Latest news, stats" not in content and len(content) > 50:
-                    return f"{content}"
-
-            # 2. Chercher dans le JSON-LD (Données structurées)
-            scripts = soup.find_all('script', type='application/ld+json')
-            for script in scripts:
-                if "description" in script.text:
-                    try:
-                        data = json.loads(script.text)
-                        if 'description' in data:
-                            return data['description']
-                    except:
-                        pass
-    except:
-        pass
-    return None
-
-def scrape_nbc_data(player_name):
-    player_info = None
-    normalized_input = normalize_text(player_name)
-    
-    if player_name in PLAYER_CACHE:
-        player_info = PLAYER_CACHE[player_name]
-    else:
-        for db_name, info in PLAYER_CACHE.items():
-            if normalized_input in normalize_text(db_name):
-                player_info = info
-                break
-    
-    if not player_info:
-        return "Joueur introuvable dans la base NBA."
-        
-    # TENTATIVE 1 : Page Équipe (Injuries)
-    team_slug = player_info['team_slug']
     url = f"https://www.nbcsports.com/nba/{team_slug}/injuries"
     
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        target_lastname = normalize_text(player_info['name'].split()[-1])
+        response = requests.get(url, headers=HEADERS, timeout=8)
+        # Fallback 404 : parfois l'URL est sans le '/injuries' pour les news générales
+        if response.status_code == 404:
+             url = f"https://www.nbcsports.com/nba/{team_slug}"
+             response = requests.get(url, headers=HEADERS, timeout=8)
 
-        # A. DOM Parsing
-        injury_rows = soup.find_all("div", class_=lambda x: x and "sr-us-injuries-line__wrapper" in x)
-        if injury_rows:
-            for row in injury_rows:
-                name_div = row.find("div", class_=lambda x: x and "sr-us-injuries-line__player-name" in x)
-                if name_div and target_lastname in normalize_text(name_div.get_text(strip=True)):
-                    injury_div = row.find("div", class_=lambda x: x and "sr-us-injuries-line__injury" in x)
-                    comment_div = row.find("div", class_=lambda x: x and "sr-us-injuries-line__comment" in x)
-                    inj = injury_div.get_text(strip=True) if injury_div else "Info"
-                    com = comment_div.get_text(strip=True) if comment_div else ""
-                    return f"{inj}: {com}"
-
-        # B. Fallback Regex sur Page Équipe (Nom de famille uniquement)
-        # On cherche "Lillard" suivi de texte, au cas où "Damian" n'est pas écrit
         page_source = response.text
-        # Regex : Lastname + caractères arbitraires + mots clés de blessure potentiels dans les 300 caractères
-        # On évite d'être trop restrictif sur les mots clés pour attraper les textes libres
-        match = re.search(rf"{re.escape(player_info['name'].split()[-1])}.*?(.{{10,300}})", page_source, re.IGNORECASE | re.DOTALL)
+        
+        # On cherche le nom de famille du joueur
+        lastname = player_name.split()[-1]
+        
+        # REGEX: Cherche le nom + du texte jusqu'à trouver des mots clés de statut
+        # Pattern : Lastname ... (texte de 10 à 400 caractères)
+        match = re.search(rf"{re.escape(lastname)}.*?(.{{10,400}})", page_source, re.IGNORECASE | re.DOTALL)
         
         if match:
             raw_fragment = match.group(1)
-            # Vérification simple pour éviter de capturer du code JS
-            if "{" not in raw_fragment[:50]: 
-                cleaned = clean_regex_result(raw_fragment)
-                # Si le texte semble pertinent (contient des mots clés ou une date)
-                if any(x in cleaned.lower() for x in ['injury', 'out', 'status', 'back', 'season', 'game', 'day']):
-                     return f"Info Équipe (Raw): {cleaned}"
+            cleaned = clean_regex_result(raw_fragment)
+            
+            # Filtre de pertinence
+            keywords = ['injury', 'out', 'status', 'surgery', 'strain', 'questionable', 'doubtful', 'probable', 'available', 'sidelined', 'weeks', 'days']
+            if any(k in cleaned.lower() for k in keywords):
+                return cleaned
+            else:
+                # Si on trouve le nom mais pas de mot clé blessure proche, on renvoie quand même le snippet
+                # car ça peut être une news tactique
+                return f"News: {cleaned}"
 
-        # TENTATIVE 2 : Page Profil Joueur (Fallback ultime)
-        # Si rien sur la page équipe, on checke la page du joueur
-        profile_info = scrape_nbc_player_profile(player_info['name'])
-        if profile_info:
-            return f"Profil NBC: {profile_info}"
-        
-        # TENTATIVE 3 : Backup Rotowire
-        backup = scrape_rotowire_injuries(player_name)
-        if backup:
-            return f"Via Rotowire: {backup}"
-
-        return f"Aucune info active trouvée pour {player_info['name']}."
+        return f"Aucune blessure signalée sur la page {team_slug}."
 
     except Exception as e:
-        print(f"Erreur NBC: {e}")
-        return "Erreur technique scraping."
+        return f"Erreur NBC: {e}"
 
-def scrape_cbs_injuries(player_name):
-    url = "https://www.cbssports.com/nba/injuries/"
+def scrape_rotowire(player_name):
+    # Backup simple
     try:
-        response = requests.get(url, headers=HEADERS, timeout=5)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        rows = soup.find_all('tr')
-        normalized_target = normalize_text(player_name)
-        for row in rows:
-            cols = row.find_all('td')
-            if len(cols) >= 2:
-                name_col = cols[0].get_text()
-                if normalized_target in normalize_text(name_col):
-                    status = cols[-1].get_text(strip=True)
-                    injury = cols[-2].get_text(strip=True)
-                    return f"{status} - {injury}"
-        return None
-    except:
-        return None
-
-def scrape_rotowire_injuries(player_name):
-    url = "https://www.rotowire.com/basketball/injury-report.php"
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=6)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        normalized_target = normalize_text(player_name)
+        url = "https://www.rotowire.com/basketball/injury-report.php"
+        res = requests.get(url, headers=HEADERS, timeout=5)
+        soup = BeautifulSoup(res.content, 'html.parser')
         links = soup.find_all('a', href=True)
+        norm_name = normalize_text(player_name)
         for link in links:
-            if "player" in link['href'] and normalized_target in normalize_text(link.get_text()):
+            if "player" in link['href'] and norm_name in normalize_text(link.text):
                 row = link.find_parent('div', class_='injury-report__row')
-                if not row: row = link.find_parent('tr')
                 if row:
-                    injury_div = row.find(class_='injury-report__injury')
-                    status_div = row.find(class_='injury-report__status')
-                    inj = injury_div.get_text(strip=True) if injury_div else "Unknown"
-                    stat = status_div.get_text(strip=True) if status_div else ""
-                    return f"{stat} - {inj}"
+                    inj = row.find(class_='injury-report__injury')
+                    status = row.find(class_='injury-report__status')
+                    return f"{status.text.strip()} - {inj.text.strip()}" if status and inj else "Info trouvée"
         return None
     except:
         return None
+
+# --- ROUTES ---
 
 @app.on_event("startup")
 def startup_event():
@@ -247,7 +200,7 @@ def startup_event():
 
 @app.get("/")
 def home():
-    return f"API NBA Ready (FastAPI). {len(PLAYER_CACHE)} joueurs en DB."
+    return "API NBA Ready"
 
 @app.get("/api/players")
 def get_all_players():
@@ -255,16 +208,38 @@ def get_all_players():
 
 @app.get("/api/check")
 def check_injury(player: str = Query(..., min_length=1)):
-    nbc = scrape_nbc_data(player)
-    cbs = scrape_cbs_injuries(player)
-    rotowire = scrape_rotowire_injuries(player)
     
+    # 1. Récupération ID et Métadonnées
+    player_data = PLAYER_CACHE.get(player)
+    if not player_data:
+        # Recherche fuzzy simple
+        for name, data in PLAYER_CACHE.items():
+            if normalize_text(player) in normalize_text(name):
+                player_data = data
+                player = name # Correction du nom
+                break
+    
+    if not player_data:
+        return {"error": "Joueur introuvable"}
+
+    # 2. Appel API NBA pour détails frais (Age, Team exact)
+    details = get_player_details(player_data['id'])
+    
+    # 3. Scraping ciblé sur l'équipe
+    nbc_info = scrape_nbc_team_page(details['team_slug'], player)
+    roto_info = scrape_rotowire(player)
+
     return {
         "player": player,
+        "meta": {
+            "age": details['age'],
+            "team": details['team_name'],
+            "position": details['position'],
+            "jersey": details['jersey']
+        },
         "sources": {
-            "NBC": nbc,
-            "CBS": cbs if cbs else "Healthy",
-            "Rotowire": rotowire if rotowire else "Healthy"
+            "NBC": nbc_info,
+            "Rotowire": roto_info if roto_info else "Rien à signaler"
         }
     }
 
