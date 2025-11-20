@@ -1,10 +1,14 @@
 import os
+import json
 import requests
 import unicodedata
 import re
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from bs4 import BeautifulSoup
+
+# Importation de l'API NBA
+from nba_api.stats.endpoints import commonallplayers
 
 app = Flask(__name__)
 CORS(app)
@@ -16,140 +20,161 @@ HEADERS = {
     'Referer': 'https://www.nbcsports.com/'
 }
 
-# --- MAPPING JOUEUR -> EQUIPE (Nécessaire pour NBC) ---
-# NBC classe les blessures par URL d'équipe.
-# Format slug: 'portland-trail-blazers', 'los-angeles-lakers', etc.
-PLAYER_TEAMS = {
-    "Blake Wesley": "san-antonio-spurs", # Note: Il est chez les Spurs en réalité, mais pour l'exemple je vais checker l'URL que vous avez donnée si c'était Portland
-    "LeBron James": "los-angeles-lakers",
-    "Anthony Davis": "los-angeles-lakers",
-    "Stephen Curry": "golden-state-warriors",
-    "Kevin Durant": "phoenix-suns",
-    "Devin Booker": "phoenix-suns",
-    "Nikola Jokic": "denver-nuggets",
-    "Jamal Murray": "denver-nuggets",
-    "Giannis Antetokounmpo": "milwaukee-bucks",
-    "Damian Lillard": "milwaukee-bucks",
-    "Luka Doncic": "dallas-mavericks",
-    "Kyrie Irving": "dallas-mavericks",
-    "Jayson Tatum": "boston-celtics",
-    "Jaylen Brown": "boston-celtics",
-    "Joel Embiid": "philadelphia-76ers",
-    "Tyrese Maxey": "philadelphia-76ers",
-    "Shai Gilgeous-Alexander": "oklahoma-city-thunder",
-    "Chet Holmgren": "oklahoma-city-thunder",
-    "Victor Wembanyama": "san-antonio-spurs",
-    "Ja Morant": "memphis-grizzlies",
-    "Desmond Bane": "memphis-grizzlies",
-    "Zion Williamson": "new-orleans-pelicans",
-    "Jimmy Butler": "miami-heat",
-    "Bam Adebayo": "miami-heat",
-    "Donovan Mitchell": "cleveland-cavaliers",
-    "Kawhi Leonard": "los-angeles-clippers",
-    "Paul George": "los-angeles-clippers",
-    "James Harden": "los-angeles-clippers",
-    "LaMelo Ball": "charlotte-hornets",
-    "Anthony Edwards": "minnesota-timberwolves",
-    "Karl-Anthony Towns": "minnesota-timberwolves",
-    "De'Aaron Fox": "sacramento-kings",
-    "Domantas Sabonis": "sacramento-kings",
-    "Jalen Brunson": "new-york-knicks",
-    "Julius Randle": "new-york-knicks",
-    "Tyrese Haliburton": "indiana-pacers",
-    "Pascal Siakam": "indiana-pacers",
-    "Trae Young": "atlanta-hawks",
-    "Scottie Barnes": "toronto-raptors",
-    "Cade Cunningham": "detroit-pistons",
-    "Fred VanVleet": "houston-rockets",
-    "Alperen Sengun": "houston-rockets",
-    "Lauri Markkanen": "utah-jazz",
-    "Deandre Ayton": "portland-trail-blazers",
-    "Anfernee Simons": "portland-trail-blazers",
-    "Scoot Henderson": "portland-trail-blazers",
-    "Shaedon Sharpe": "portland-trail-blazers",
-    "Jerami Grant": "portland-trail-blazers",
-    "Robert Williams III": "portland-trail-blazers"
-}
-
-# Liste pour l'autocomplétion (identique à avant pour le frontend)
-ALL_PLAYERS = list(PLAYER_TEAMS.keys()) # Pour l'instant on utilise les clés, mais gardez votre grande liste ALL_PLAYERS ici en prod.
+JSON_FILE = 'nba_players.json'
+PLAYER_CACHE = {}
 
 def normalize_text(text):
+    """Nettoyage de texte standard"""
     if not text: return ""
-    return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn').lower().strip()
+    return ''.join(c for c in unicodedata.normalize('NFD', str(text)) if unicodedata.category(c) != 'Mn').lower().strip()
+
+def generate_team_slug(team_city, team_name):
+    """
+    Transforme 'Portland', 'Trail Blazers' en 'portland-trail-blazers'
+    pour l'URL NBC Sports.
+    """
+    full_name = f"{team_city} {team_name}"
+    return full_name.lower().replace(" ", "-").replace(".", "")
+
+def update_player_database():
+    """
+    Utilise l'API NBA pour récupérer tous les joueurs actifs et leurs équipes.
+    Sauvegarde le résultat dans un fichier JSON.
+    """
+    print("Mise à jour de la base de données joueurs via NBA API...")
+    try:
+        # Récupère tous les joueurs de la saison en cours (IsOnlyCurrentSeason=1)
+        nba_response = commonallplayers.CommonAllPlayers(is_only_current_season=1)
+        data = nba_response.get_dict()
+        
+        # Parsing de la réponse (Headers: PERSON_ID, DISPLAY_LAST_COMMA_FIRST, ..., TEAM_CITY, TEAM_NAME, ...)
+        headers = data['resultSets'][0]['headers']
+        rows = data['resultSets'][0]['rowSet']
+        
+        players_dict = {}
+        
+        # Index des colonnes
+        idx_name = headers.index('DISPLAY_FIRST_LAST')
+        idx_city = headers.index('TEAM_CITY')
+        idx_team_name = headers.index('TEAM_NAME')
+        idx_team_id = headers.index('TEAM_ID')
+        
+        for row in rows:
+            name = row[idx_name]
+            team_city = row[idx_city]
+            team_name = row[idx_team_name]
+            team_id = row[idx_team_id]
+            
+            # On ne garde que les joueurs associés à une équipe (TEAM_ID != 0)
+            if team_id != 0:
+                slug = generate_team_slug(team_city, team_name)
+                # Clé normalisée pour la recherche facile
+                players_dict[name] = {
+                    "name": name,
+                    "team_slug": slug,
+                    "team_city": team_city,
+                    "team_name": team_name
+                }
+        
+        # Sauvegarde JSON
+        with open(JSON_FILE, 'w') as f:
+            json.dump(players_dict, f)
+            
+        print(f"Base de données mise à jour : {len(players_dict)} joueurs actifs.")
+        return players_dict
+
+    except Exception as e:
+        print(f"Erreur lors de la mise à jour NBA API: {e}")
+        return {}
+
+def load_player_database():
+    """Charge le JSON en mémoire, ou le crée s'il n'existe pas."""
+    global PLAYER_CACHE
+    
+    if os.path.exists(JSON_FILE):
+        with open(JSON_FILE, 'r') as f:
+            PLAYER_CACHE = json.load(f)
+    else:
+        PLAYER_CACHE = update_player_database()
+
+# Chargement au démarrage de l'application
+with app.app_context():
+    load_player_database()
+
+# --- LOGIQUE SCRAPING ---
 
 def scrape_nbc_data(player_name):
     """
-    Scrape la page d'équipe NBC Sports en utilisant la structure HTML spécifique fournie.
-    Target URL: https://www.nbcsports.com/nba/{team-slug}/injuries
-    Structure: div.sr-us-injuries-line__wrapper
+    1. Trouve l'équipe du joueur dans le cache JSON.
+    2. Construit l'URL : nbcsports.com/nba/{team-slug}/injuries
+    3. Scrape avec la structure HTML fournie par l'utilisateur.
     """
     
-    # 1. Trouver l'équipe du joueur
-    # Fallback: si on ne connait pas l'équipe, on ne peut pas deviner l'URL NBC
-    # Pour "Blake Wesley", il est listé aux Spurs, mais si vous testez Portland, ajustez le dictionnaire.
-    team_slug = PLAYER_TEAMS.get(player_name)
+    # 1. Recherche du joueur dans le cache (recherche approximative)
+    player_info = None
+    normalized_input = normalize_text(player_name)
     
-    # Petite logique floue si le nom exact n'est pas dans les clés
-    if not team_slug:
-        for name, slug in PLAYER_TEAMS.items():
-            if normalize_text(player_name) in normalize_text(name):
-                team_slug = slug
+    # Recherche exacte d'abord
+    if player_name in PLAYER_CACHE:
+        player_info = PLAYER_CACHE[player_name]
+    else:
+        # Recherche partielle
+        for db_name, info in PLAYER_CACHE.items():
+            if normalized_input in normalize_text(db_name):
+                player_info = info
                 break
     
-    if not team_slug:
-        return "Équipe inconnue pour ce joueur (Mise à jour DB nécessaire pour NBC)"
-
+    if not player_info:
+        return "Joueur introuvable dans la base NBA actuelle."
+        
+    team_slug = player_info['team_slug']
     url = f"https://www.nbcsports.com/nba/{team_slug}/injuries"
     
     try:
+        print(f"Scraping NBC pour {player_info['name']} sur {url}")
         response = requests.get(url, headers=HEADERS, timeout=10)
         
         if response.status_code != 200:
-            return f"Erreur accès page équipe ({response.status_code})"
+            return f"Erreur page équipe NBC ({response.status_code})"
 
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # 2. Parsing basé sur votre OuterHTML
-        # On cherche tous les wrappers de ligne de blessure
-        # La classe exacte fournie: "sr-us-injuries-line__wrapper"
+        # 2. Parsing basé sur votre structure HTML précise
+        # Classe parente : sr-us-injuries-line__wrapper
         injury_rows = soup.find_all("div", class_=lambda x: x and "sr-us-injuries-line__wrapper" in x)
         
-        normalized_target = normalize_text(player_name)
-        
         if not injury_rows:
-            # Si requests ne voit pas le HTML (car généré par JS), on aura 0 rows.
-            # C'est souvent le cas avec les widgets "sr-" (Sportradar).
-            return "Données non chargées (Widget JS détecté). Essayez Rotowire."
+            return "Aucune donnée chargée (Widget JS potentiellement bloqué par Render/Cloudflare)."
+
+        target_name_norm = normalize_text(player_info['name'])
+        # Parfois NBA API dit "Nicolas Batum" et NBC "Nic Batum", on checke le nom de famille
+        target_lastname = target_name_norm.split()[-1] if " " in target_name_norm else target_name_norm
 
         for row in injury_rows:
-            # Chercher le nom du joueur dans cette ligne
+            # Nom du joueur dans la ligne
             name_div = row.find("div", class_=lambda x: x and "sr-us-injuries-line__player-name" in x)
             
             if name_div:
                 row_name = normalize_text(name_div.get_text(strip=True))
                 
-                # Comparaison
-                if normalized_target in row_name:
-                    # On a trouvé le joueur ! Récupérons les détails.
+                # Vérification : Est-ce notre joueur ?
+                if target_lastname in row_name:
                     
-                    # Injury Type
+                    # Type de blessure
                     injury_div = row.find("div", class_=lambda x: x and "sr-us-injuries-line__injury" in x)
-                    injury_text = injury_div.get_text(strip=True) if injury_div else "Blessure inconnue"
+                    injury_text = injury_div.get_text(strip=True) if injury_div else "Blessure"
                     
                     # Commentaire complet
                     comment_div = row.find("div", class_=lambda x: x and "sr-us-injuries-line__comment" in x)
-                    comment_text = comment_div.get_text(strip=True) if comment_div else ""
+                    comment_text = comment_div.get_text(strip=True) if comment_div else "Pas de détails."
                     
                     return f"{injury_text}: {comment_text}"
         
-        return "Aucune blessure signalée sur la page de l'équipe (Healthy ?)"
+        return f"Joueur sain (Pas sur la liste des blessés de {player_info['team_name']})."
 
     except Exception as e:
         print(f"Erreur NBC: {e}")
-        return "Erreur technique scraping NBC"
-
-# --- GARDER LES AUTRES SCRAPERS (CBS/Rotowire) COMME DEMANDÉ ---
+        return "Erreur technique lors du scraping."
 
 def scrape_cbs_injuries(player_name):
     url = "https://www.cbssports.com/nba/injuries/"
@@ -195,12 +220,20 @@ def scrape_rotowire_injuries(player_name):
 
 @app.route('/')
 def home():
-    return "API NBA Ready"
+    count = len(PLAYER_CACHE)
+    return f"API NBA Ready. {count} joueurs en base de données (JSON)."
+
+@app.route('/api/refresh-db')
+def refresh_db():
+    """Route manuelle pour forcer la mise à jour depuis NBA API"""
+    global PLAYER_CACHE
+    PLAYER_CACHE = update_player_database()
+    return jsonify({"status": "success", "count": len(PLAYER_CACHE)})
 
 @app.route('/api/players', methods=['GET'])
 def get_all_players():
-    # Renvoie la liste pour l'autocomplétion du frontend
-    return jsonify(ALL_PLAYERS)
+    # Retourne la liste des noms pour l'autocomplétion
+    return jsonify(list(PLAYER_CACHE.keys()))
 
 @app.route('/api/check', methods=['GET'])
 def check_injury():
@@ -208,7 +241,6 @@ def check_injury():
     if not player_name:
         return jsonify({"error": "Nom manquant"}), 400
         
-    # Priorité NBC (nouvelle logique)
     nbc = scrape_nbc_data(player_name)
     cbs = scrape_cbs_injuries(player_name)
     rotowire = scrape_rotowire_injuries(player_name)
