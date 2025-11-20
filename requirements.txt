@@ -1,6 +1,5 @@
-flask
-flask-cors
+fastapi
+uvicorn
 requests
 beautifulsoup4
-gunicorn
 nba_api
